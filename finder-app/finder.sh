@@ -1,12 +1,21 @@
 #!/bin/sh
-filesdir=$1
-searchstr=$2
+print_usage()
+{
+    echo "Total number of arguements should be 2"
+    echo "The order of arguements should be:"
+    echo "\t1)File directory path"
+    echo "\t2)String to be searched in the specified directory path"
+}
 
 if [ $# -ne 2 ]
 then
-    echo "Invalid number of arguements"
+    echo "Error: Invalid Number of Arguements"
+    print_usage
     exit 1
 fi
+
+filesdir=$1
+searchstr=$2
 
 if [ ! -d $filesdir ]
 then
