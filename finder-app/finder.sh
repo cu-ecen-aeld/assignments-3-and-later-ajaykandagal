@@ -19,7 +19,7 @@ searchstr=$2
 
 if [ ! -d $filesdir ]
 then
-    echo "Directory not present"
+    echo "Error: \"$filesdir\" directory not present"
     exit 1
 fi
 

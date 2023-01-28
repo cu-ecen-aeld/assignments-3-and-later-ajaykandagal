@@ -28,5 +28,5 @@ if [ -f $writefile ]
 then
     echo $writestr > $writefile
 else
-    echo "Failed to create file"
+    echo "Error: Failed to create \"$writefile\" file"
 fi
