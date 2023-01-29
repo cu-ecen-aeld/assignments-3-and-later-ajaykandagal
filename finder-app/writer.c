@@ -13,6 +13,7 @@ void print_usage()
 int main(int argc, char** argv)
 {
     openlog(NULL, 0, LOG_USER);
+
     if (argc != 3) {
         syslog(LOG_ERR, "Invalid number of arguements: %d", (argc - 1));
         print_usage();
@@ -26,7 +27,7 @@ int main(int argc, char** argv)
     fd = fopen(writefile, "w");
 
     if (fd == NULL) {
-        syslog(LOG_ERR, "Failed to open %s", writefile);
+        syslog(LOG_ERR, "Failed to create %s", writefile);
         return 1;
     }
 

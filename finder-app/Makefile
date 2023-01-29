@@ -1,10 +1,12 @@
-cc = gcc
-files := writer.c
+CC = $(CROSS-COMPILE)gcc
+CFLAGS = -g -Wall
+TARGET = writer
 
-all: writer
+all: $(TARGET)
 
-writer: $(files)
-	$(cc) -o writer $(files)
+$(TARGET): $(TARGET).c
+	$(CC) $(CFLAGS) -c -o $(TARGET).o $(TARGET).c
+	$(CC) $(CFLAGS) -I/ -o $(TARGET) $(TARGET).o
 
 clean:
-	rm -f writer
+	rm -f $(TARGET) *.o *.elf *.map
