@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <signal.h>
 #include <errno.h>
 #include <string.h>
 #include <unistd.h>
@@ -15,6 +16,10 @@
 
 int process_read_data(char *buffer, int buff_len, int file_fd);
 int get_write_data(char **malloc_buffer, int total_size, int file_fd);
+void sigint_handler();
+
+int file_fd;
+int server_fd;
 
 int main()
 {
@@ -23,8 +28,10 @@ int main()
 
     openlog(NULL, 0, LOG_USER);
 
+    signal(SIGINT, sigint_handler);
+
     // file_ptr = fopen("/var/tmp/aesdsocketdata", "w+");
-    int file_fd = open(SOCK_DATA_FILE, O_CREAT | O_RDWR, S_IRWXU | S_IRWXG | S_IRWXO);
+    file_fd = open(SOCK_DATA_FILE, O_CREAT | O_RDWR, S_IRWXU | S_IRWXG | S_IRWXO);
 
     if (file_fd < 0)
     {
@@ -34,7 +41,7 @@ int main()
     }
 
     // Create server socket
-    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    server_fd = socket(AF_INET, SOCK_STREAM, 0);
 
     // Check if socket is created successfully
     if (server_fd < 0)
@@ -211,7 +218,7 @@ int process_read_data(char *buffer, int buff_len, int file_fd)
     static int malloc_buffer_len = 0;
     int index = 0;
 
-    // Find the delimeter \n in the received buffer
+    // Find the delimeter '\n' in the received buffer
     for (index = 0; index < buff_len && buffer[index] != '\n'; index++)
         ;
 
@@ -261,4 +268,18 @@ int get_write_data(char **malloc_buffer, int total_size, int file_fd)
     int read_ret = read(file_fd, *malloc_buffer, total_size);
 
     return read_ret;
+}
+
+void sigint_handler()
+{
+    if (file_fd > 0)
+        close(file_fd);
+
+    if (server_fd > 0)
+        shutdown(server_fd, SHUT_RDWR);
+
+    if (remove(SOCK_DATA_FILE) < 0)
+        printf("Error while deleting %s file\n", SOCK_DATA_FILE);
+
+    exit(0);
 }
