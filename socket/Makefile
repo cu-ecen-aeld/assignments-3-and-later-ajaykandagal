@@ -9,4 +9,4 @@ $(TARGET): $(TARGET).c
 	$(CC) $(CFLAGS) -I/ -o $(TARGET) $(TARGET).o
 
 clean:
-	rm -f $(TARGET) *.o *.elf *.map
+	rm -f $(TARGET) *.o *.elf *.map *.out

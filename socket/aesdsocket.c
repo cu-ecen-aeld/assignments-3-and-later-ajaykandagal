@@ -5,10 +5,11 @@
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <string.h>
 
 #define SERVER_PORT     (9000)
 #define MAX_BACKLOGS    (3)
-#define BUFFER_MAX_SIZE (1024)
+#define BUFFER_MAX_SIZE (20000)
 
 void print_buffer(char *buffer, int len);
 
@@ -16,7 +17,7 @@ int main()
 {
     int server_fd;
     int client_fd;
-    int file_fd;
+    FILE *file_ptr;
     struct sockaddr_in server_addr;
     struct sockaddr_in client_addr;
     socklen_t client_addr_len;
@@ -24,7 +25,7 @@ int main()
     int buffer_len;
     int opt = 1;
 
-    file_fd = open("/var/tmp/aesdsocketdata", O_CREAT | O_WRONLY | O_RDONLY, S_IRWXU | S_IRWXG | S_IRWXO);
+    file_ptr = fopen("/var/tmp/aesdsocketdata", "w+");
 
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
 
@@ -62,40 +63,41 @@ int main()
         printf("Successfully binded!\n");
     }
 
-    if (listen(server_fd, MAX_BACKLOGS))
-    {
-        printf("Failed to listen\n");
-        return -1;
+    for (int i = 0; i < 5; i++) {
+        if (listen(server_fd, MAX_BACKLOGS))
+        {
+            printf("Failed to listen\n");
+            return -1;
+        }
+        else
+        {
+            printf("listening...\n");
+        }
+
+        client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_addr_len);
+
+        if (client_fd < 0)
+        {
+            printf("Failed to connect to client\n");
+            return -1;
+        }
+        else
+        {
+            printf("Connected to client!\n");
+        }
+
+        buffer_len = read(client_fd, buffer, BUFFER_MAX_SIZE);
+        print_buffer(buffer, buffer_len);
+        fwrite(buffer, buffer_len, 1, file_ptr);
+        
+        buffer_len = 0;
+        fseek(file_ptr, 0, SEEK_SET);
+        while(fread(&buffer[buffer_len++], 1, 1, file_ptr) > 0);
+        buffer_len = write(client_fd, buffer, buffer_len - 1);
+
+        close(client_fd);
     }
-    else
-    {
-        printf("listening...\n");
-    }
-
-    client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_addr_len);
-
-    if (client_fd < 0)
-    {
-        printf("Failed to connect to client\n");
-        return -1;
-    }
-    else
-    {
-        printf("Connected to client!\n");
-    }
-
-    buffer_len = read(client_fd, buffer, BUFFER_MAX_SIZE);
-    print_buffer(buffer, buffer_len);
-    write(file_fd, buffer, buffer_len);
-    buffer_len = write(client_fd, buffer, buffer_len);
-
-    buffer_len = read(client_fd, buffer, BUFFER_MAX_SIZE);
-    print_buffer(buffer, buffer_len);
-    write(file_fd, buffer, buffer_len);
-    buffer_len = write(client_fd, buffer, buffer_len);
-
-    close(file_fd);
-    close(client_fd);
+    fclose(file_ptr);
     shutdown(server_fd, SHUT_RDWR);
     
     return 0;
