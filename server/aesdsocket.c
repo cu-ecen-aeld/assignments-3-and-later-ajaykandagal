@@ -1,13 +1,23 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <signal.h>
 #include <errno.h>
 #include <string.h>
 #include <unistd.h>
 #include <syslog.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+
+#define STDOUT_ENABLED      (0)
+
+#if STDOUT_ENABLED
+#define LOG_PRINTF          printf
+#else
+#define LOG_PRINTF(...)
+#endif
 
 #define SERVER_PORT         (9000)
 #define MAX_BACKLOGS        (3)
@@ -16,12 +26,14 @@
 
 int process_read_data(char *buffer, int buff_len, int file_fd);
 int get_write_data(char **malloc_buffer, int total_size, int file_fd);
+void become_daemon();
 void sigint_handler();
+void print_usage();
 
 int file_fd;
 int server_fd;
 
-int main()
+int main(int argc, char** argv)
 {
     int client_fd;
     struct sockaddr_in client_addr;
@@ -36,6 +48,22 @@ int main()
     int total_recv_bytes = 0;
 
     int ret_status = 0;
+    int run_as_daemon = 0;
+
+    if (argc <= 2) {
+        if (argc == 2) {
+            if (!strcmp(argv[1],"-d")) {
+               run_as_daemon = 1;
+               printf("The process will be run as daemon\n");
+            }
+            else {
+                print_usage();
+            }
+        }
+    }
+    else {
+        print_usage();
+    }
 
     openlog(NULL, 0, LOG_USER);
 
@@ -64,7 +92,7 @@ int main()
     }
     else
     {
-        printf("Created scoket!\n");
+        printf("Created scoket\n");
     }
 
     // Set socket options for reusing address and port
@@ -76,7 +104,7 @@ int main()
     }
     else
     {
-        printf("Successfully set socket options!\n");
+        printf("Successfully set socket options\n");
     }
 
     struct sockaddr_in server_addr;
@@ -92,22 +120,23 @@ int main()
     }
     else
     {
-        printf("Successfully binded!\n");
+        printf("Successfully binded\n");
     }
 
-    // pid_t pid = fork();
+    if (run_as_daemon)
+        become_daemon();
 
-    while (1)       // loop for re-connection
+    while (true)       // loop for new connection
     {
         if (listen(server_fd, MAX_BACKLOGS))
         {
-            printf("Failed to listen\n");
+            LOG_PRINTF("Failed to listen\n");
             ret_status = -1;
             goto exit_main;
         }
         else
         {
-            printf("listening...\n");
+            LOG_PRINTF("listening...\n");
         }
 
         // Accept the incoming connection
@@ -118,13 +147,13 @@ int main()
 
         if (client_fd < 0)
         {
-            printf("Failed to connect to client\n");
+            LOG_PRINTF("Failed to connect to client\n");
             goto close_client;
         }
         else
         {
             syslog(LOG_INFO, "Accepted connection from %s", client_addr_str);
-            printf("Accepted connection from %s\n", client_addr_str);
+            LOG_PRINTF("Accepted connection from %s\n", client_addr_str);
         }
 
         while (1)   // loop for a connection session
@@ -135,12 +164,12 @@ int main()
 
                 if (buffer_len == 0)
                 {
-                    printf("Connection Closed from %s\n", client_addr_str);
+                    LOG_PRINTF("Connection Closed from %s\n", client_addr_str);
                     goto close_client;
                 }
                 else if(buffer_len < 0)
                 {
-                    printf("Error getting data from client\n");
+                    LOG_PRINTF("Error getting data from client\n");
                     goto close_client;
                 }
 
@@ -148,7 +177,7 @@ int main()
 
                 if (ret_data == -1)
                 {
-                    printf("Malloc error\n");
+                    LOG_PRINTF("Malloc error\n");
                     goto close_client;
                 }
                 else if (ret_data > 0)
@@ -156,36 +185,36 @@ int main()
                     total_recv_bytes += ret_data;
                     break;
                 }
-                else
-                    ;
+                else;
             }
+            LOG_PRINTF("Read bytes till /\n from client\n");
 
             int ret_data = get_write_data(&write_malloc_buffer, total_recv_bytes, file_fd);
 
             if (ret_data == -1)
             {
-                printf("Malloc error\n");
+                LOG_PRINTF("Malloc error\n");
                 goto close_client;
             }
             else if (ret_data != total_recv_bytes)
             {
-                printf("Failed to read all the data from the file\n");
+                LOG_PRINTF("Failed to read all the data from the file\n");
                 goto close_client;
             }
             else
             {
-                printf("Successfully read all bytes from the file\n");
+                LOG_PRINTF("Successfully read all bytes from the file\n");
             }
 
             buffer_len = write(client_fd, write_malloc_buffer, total_recv_bytes);
 
             if (buffer_len == total_recv_bytes)
             {
-                printf("Sent all bytes to client!\n");
+                LOG_PRINTF("Sent all bytes to client!\n");
             }
             else
             {
-                printf("Error while sending data to client\n");
+                LOG_PRINTF("Error while sending data to client\n");
                 goto close_client;
             }
         }
@@ -206,10 +235,10 @@ exit_main:
         close(file_fd);
 
     if (server_fd > 0)
-        shutdown(server_fd, SHUT_RDWR);
+        close(server_fd);
 
     if (remove(SOCK_DATA_FILE) < 0)
-        printf("Error while deleting %s file\n", SOCK_DATA_FILE);
+        LOG_PRINTF("Error while deleting %s file\n", SOCK_DATA_FILE);
 
     return ret_status;
 }
@@ -274,16 +303,58 @@ int get_write_data(char **malloc_buffer, int total_size, int file_fd)
 
 void sigint_handler()
 {
-    printf("Exiting...\n");
+    LOG_PRINTF("Exiting...\n");
 
     if (file_fd > 0)
         close(file_fd);
 
     if (server_fd > 0)
-        shutdown(server_fd, SHUT_RDWR);
+        close(server_fd);
 
     if (remove(SOCK_DATA_FILE) < 0)
-        printf("Error while deleting %s file\n", SOCK_DATA_FILE);
+        LOG_PRINTF("Error while deleting %s file\n", SOCK_DATA_FILE);
 
     exit(0);
+}
+
+void become_daemon()
+{
+    pid_t pid;
+    
+    pid = fork();
+    
+    if (pid < 0)
+        exit(EXIT_FAILURE);
+    
+     // Terminate the parent process
+    if (pid > 0)
+        exit(EXIT_SUCCESS);
+    
+    // On success make the child process session leader
+    if (setsid() < 0)
+        exit(EXIT_FAILURE);
+    
+    // Fork off for the second time
+    pid = fork();
+    
+    if (pid < 0)
+        exit(EXIT_FAILURE);
+    
+    // Terminate the parent process
+    if (pid > 0)
+        exit(EXIT_SUCCESS);
+    
+    // Set new file permissions
+    umask(0);
+    
+    // Change the working directory to the root directory
+    chdir("/");
+}
+
+void print_usage()
+{
+    printf("Total number of arguements should 1 or less\n");
+    printf("The order of arguements should be:\n");
+    printf("\t1) To run the process as daemon\n");
+    printf("Usgae: aesdsocket -d\n");
 }
