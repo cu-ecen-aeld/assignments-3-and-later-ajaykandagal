@@ -9,10 +9,10 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 
-#define SERVER_PORT (9000)
-#define MAX_BACKLOGS (3)
-#define BUFFER_MAX_SIZE (1024)
-#define SOCK_DATA_FILE ("/var/tmp/aesdsocketdata")
+#define SERVER_PORT         (9000)
+#define MAX_BACKLOGS        (3)
+#define BUFFER_MAX_SIZE     (1024)
+#define SOCK_DATA_FILE      ("/var/tmp/aesdsocketdata")
 
 int process_read_data(char *buffer, int buff_len, int file_fd);
 int get_write_data(char **malloc_buffer, int total_size, int file_fd);
@@ -23,12 +23,24 @@ int server_fd;
 
 int main()
 {
+    int client_fd;
+    struct sockaddr_in client_addr;
+    socklen_t client_addr_len;
+    char client_addr_str[INET_ADDRSTRLEN];
     int opt = 1;
+
+    char buffer[BUFFER_MAX_SIZE];
+    int buffer_len = 0;
+
+    char *write_malloc_buffer = NULL;
+    int total_recv_bytes = 0;
+
     int ret_status = 0;
 
     openlog(NULL, 0, LOG_USER);
 
     signal(SIGINT, sigint_handler);
+    signal(SIGTERM, sigint_handler);
 
     // file_ptr = fopen("/var/tmp/aesdsocketdata", "w+");
     file_fd = open(SOCK_DATA_FILE, O_CREAT | O_RDWR, S_IRWXU | S_IRWXG | S_IRWXO);
@@ -83,18 +95,9 @@ int main()
         printf("Successfully binded!\n");
     }
 
-    int client_fd;
-    struct sockaddr_in client_addr;
-    socklen_t client_addr_len;
-    char buffer[BUFFER_MAX_SIZE];
-    char client_addr_str[INET_ADDRSTRLEN];
-    char *write_malloc_buffer = NULL;
-    int buffer_len = 0; //, malloc_buffer_len = 0;
-    int total_recv_bytes = 0;
+    // pid_t pid = fork();
 
-    int count = 5;
-
-    while (count)
+    while (1)       // loop for re-connection
     {
         if (listen(server_fd, MAX_BACKLOGS))
         {
@@ -116,31 +119,29 @@ int main()
         if (client_fd < 0)
         {
             printf("Failed to connect to client\n");
-            ret_status = -1;
-            goto exit_main;
+            goto close_client;
         }
         else
         {
             syslog(LOG_INFO, "Accepted connection from %s", client_addr_str);
-            printf("Connected to client!\n");
+            printf("Accepted connection from %s\n", client_addr_str);
         }
 
-        while (1)
+        while (1)   // loop for a connection session
         {
-
-            while (1)
+            while (1)   // loop for a read session
             {
                 buffer_len = read(client_fd, buffer, BUFFER_MAX_SIZE);
 
                 if (buffer_len == 0)
                 {
-                    printf("Connection lost with client\n");
-                    break;
+                    printf("Connection Closed from %s\n", client_addr_str);
+                    goto close_client;
                 }
-                else if (buffer_len < 0)
+                else if(buffer_len < 0)
                 {
                     printf("Error getting data from client\n");
-                    break;
+                    goto close_client;
                 }
 
                 int ret_data = process_read_data(buffer, buffer_len, file_fd);
@@ -148,7 +149,7 @@ int main()
                 if (ret_data == -1)
                 {
                     printf("Malloc error\n");
-                    break;
+                    goto close_client;
                 }
                 else if (ret_data > 0)
                 {
@@ -159,19 +160,17 @@ int main()
                     ;
             }
 
-            if (buffer_len <= 0)
-                break;
-
             int ret_data = get_write_data(&write_malloc_buffer, total_recv_bytes, file_fd);
 
             if (ret_data == -1)
             {
                 printf("Malloc error\n");
-                break;
+                goto close_client;
             }
             else if (ret_data != total_recv_bytes)
             {
                 printf("Failed to read all the data from the file\n");
+                goto close_client;
             }
             else
             {
@@ -187,13 +186,16 @@ int main()
             else
             {
                 printf("Error while sending data to client\n");
-                break;
+                goto close_client;
             }
         }
 
-        syslog(LOG_INFO, "Closed connection from %s", client_addr_str);
-        close(client_fd);
-        count--;
+    close_client:
+        if (client_fd > 0)
+        {
+            close(client_fd);
+            syslog(LOG_INFO, "Closed connection from %s", client_addr_str);
+        }
     }
 
 exit_main:
@@ -272,6 +274,8 @@ int get_write_data(char **malloc_buffer, int total_size, int file_fd)
 
 void sigint_handler()
 {
+    printf("Exiting...\n");
+
     if (file_fd > 0)
         close(file_fd);
 
