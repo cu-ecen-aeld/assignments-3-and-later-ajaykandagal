@@ -1,3 +1,14 @@
+/**
+ * @file    aesdsocket.c
+ * @brief   This program creates a socket and listens on Port 9000.
+ *          It connects to a client, receives data until '\n' character
+ *          is found and then writes the received data to the file
+ *          "/var/tmp/aesdsocketdata". It reads all the data from the
+ *          file and then sends it back to the client.
+ * 
+ * @author  Ajay Kandagal <ajka9053@colorado.edu>
+ * @date    Feb 25th 2023
+*/
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -27,11 +38,13 @@
 int process_read_data(char *buffer, int buff_len, int file_fd);
 int get_write_data(char **malloc_buffer, int total_size, int file_fd);
 void become_daemon();
-void sigint_handler();
+void sig_int_term_handler();
 void print_usage();
+void exit_cleanup();
 
 int file_fd;
 int server_fd;
+char *write_malloc_buffer = NULL;
 
 int main(int argc, char** argv)
 {
@@ -44,11 +57,13 @@ int main(int argc, char** argv)
     char buffer[BUFFER_MAX_SIZE];
     int buffer_len = 0;
 
-    char *write_malloc_buffer = NULL;
     int total_recv_bytes = 0;
 
     int ret_status = 0;
     int run_as_daemon = 0;
+
+    memset(&client_addr, 0, sizeof(client_addr));
+    memset(&client_addr_len, 0, sizeof(client_addr_len));
 
     if (argc <= 2) {
         if (argc == 2) {
@@ -58,17 +73,19 @@ int main(int argc, char** argv)
             }
             else {
                 print_usage();
+                return -1;
             }
         }
     }
     else {
         print_usage();
+        return -1;
     }
 
     openlog(NULL, 0, LOG_USER);
 
-    signal(SIGINT, sigint_handler);
-    signal(SIGTERM, sigint_handler);
+    signal(SIGINT, sig_int_term_handler);
+    signal(SIGTERM, sig_int_term_handler);
 
     // file_ptr = fopen("/var/tmp/aesdsocketdata", "w+");
     file_fd = open(SOCK_DATA_FILE, O_CREAT | O_RDWR, S_IRWXU | S_IRWXG | S_IRWXO);
@@ -76,8 +93,8 @@ int main(int argc, char** argv)
     if (file_fd < 0)
     {
         printf("Failed to open %s file\n", SOCK_DATA_FILE);
-        ret_status = -1;
-        goto exit_main;
+        exit_cleanup();
+        return -1;
     }
 
     // Create server socket
@@ -87,8 +104,8 @@ int main(int argc, char** argv)
     if (server_fd < 0)
     {
         printf("Failed to create socket\n");
-        ret_status = -1;
-        goto exit_main;
+        exit_cleanup();
+        return -1;
     }
     else
     {
@@ -99,8 +116,8 @@ int main(int argc, char** argv)
     if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt)))
     {
         printf("Failed to set socket options\n");
-        ret_status = -1;
-        goto exit_main;
+        exit_cleanup();
+        return -1;
     }
     else
     {
@@ -115,12 +132,23 @@ int main(int argc, char** argv)
     if (bind(server_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)))
     {
         printf("Failed to bind\n");
-        ret_status = -1;
-        goto exit_main;
+        exit_cleanup();
+        return -1;
     }
     else
     {
         printf("Successfully binded\n");
+    }
+
+    if (listen(server_fd, MAX_BACKLOGS))
+    {
+        printf("Failed to listen\n");
+        exit_cleanup();
+        return -1;
+    }
+    else
+    {
+        printf("listening...\n");
     }
 
     if (run_as_daemon)
@@ -128,17 +156,6 @@ int main(int argc, char** argv)
 
     while (true)       // loop for new connection
     {
-        if (listen(server_fd, MAX_BACKLOGS))
-        {
-            LOG_PRINTF("Failed to listen\n");
-            ret_status = -1;
-            goto exit_main;
-        }
-        else
-        {
-            LOG_PRINTF("listening...\n");
-        }
-
         // Accept the incoming connection
         client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_addr_len);
 
@@ -147,24 +164,23 @@ int main(int argc, char** argv)
 
         if (client_fd < 0)
         {
-            LOG_PRINTF("Failed to connect to client\n");
+            printf("Failed to connect to client\n");
             goto close_client;
         }
         else
         {
             syslog(LOG_INFO, "Accepted connection from %s", client_addr_str);
-            LOG_PRINTF("Accepted connection from %s\n", client_addr_str);
+            printf("Accepted connection from %s\n", client_addr_str);
         }
 
-        while (1)   // loop for a connection session
+        while (true)   // loop for a connection session
         {
-            while (1)   // loop for a read session
+            while (true)   // loop for a read session
             {
                 buffer_len = read(client_fd, buffer, BUFFER_MAX_SIZE);
 
                 if (buffer_len == 0)
                 {
-                    LOG_PRINTF("Connection Closed from %s\n", client_addr_str);
                     goto close_client;
                 }
                 else if(buffer_len < 0)
@@ -177,7 +193,7 @@ int main(int argc, char** argv)
 
                 if (ret_data == -1)
                 {
-                    LOG_PRINTF("Malloc error\n");
+                    LOG_PRINTF("Malloc error during read\n");
                     goto close_client;
                 }
                 else if (ret_data > 0)
@@ -193,7 +209,7 @@ int main(int argc, char** argv)
 
             if (ret_data == -1)
             {
-                LOG_PRINTF("Malloc error\n");
+                LOG_PRINTF("Malloc error during write\n");
                 goto close_client;
             }
             else if (ret_data != total_recv_bytes)
@@ -215,7 +231,7 @@ int main(int argc, char** argv)
             else
             {
                 LOG_PRINTF("Error while sending data to client\n");
-                goto close_client;
+                goto close_client; 
             }
         }
 
@@ -224,22 +240,11 @@ int main(int argc, char** argv)
         {
             close(client_fd);
             syslog(LOG_INFO, "Closed connection from %s", client_addr_str);
+            printf("Connection Closed from %s\n", client_addr_str);
         }
     }
 
-exit_main:
-    if (write_malloc_buffer)
-        free(write_malloc_buffer);
-
-    if (file_fd > 0)
-        close(file_fd);
-
-    if (server_fd > 0)
-        close(server_fd);
-
-    if (remove(SOCK_DATA_FILE) < 0)
-        LOG_PRINTF("Error while deleting %s file\n", SOCK_DATA_FILE);
-
+    exit_cleanup();
     return ret_status;
 }
 
@@ -301,9 +306,10 @@ int get_write_data(char **malloc_buffer, int total_size, int file_fd)
     return read_ret;
 }
 
-void sigint_handler()
+void exit_cleanup()
 {
-    LOG_PRINTF("Exiting...\n");
+    if (write_malloc_buffer)
+        free(write_malloc_buffer);
 
     if (file_fd > 0)
         close(file_fd);
@@ -311,10 +317,15 @@ void sigint_handler()
     if (server_fd > 0)
         close(server_fd);
 
-    if (remove(SOCK_DATA_FILE) < 0)
-        LOG_PRINTF("Error while deleting %s file\n", SOCK_DATA_FILE);
+    if (remove(SOCK_DATA_FILE))
+        printf("Error while deleting %s file\n", SOCK_DATA_FILE);
+}
 
-    exit(0);
+void sig_int_term_handler()
+{
+    printf("Exiting...\n");
+    exit_cleanup();
+    exit(EXIT_SUCCESS);
 }
 
 void become_daemon()
@@ -323,32 +334,45 @@ void become_daemon()
     
     pid = fork();
     
-    if (pid < 0)
+    if (pid < 0) {
+        printf("Error while creating child process\n");
+        exit_cleanup();
         exit(EXIT_FAILURE);
+    }
     
      // Terminate the parent process
-    if (pid > 0)
+    if (pid > 0) {
         exit(EXIT_SUCCESS);
+    }
     
     // On success make the child process session leader
-    if (setsid() < 0)
+    if (setsid() < 0) {
+        printf("Error while making child process as session leader\n");
+        exit_cleanup();
         exit(EXIT_FAILURE);
-    
-    // Fork off for the second time
-    pid = fork();
-    
-    if (pid < 0)
+    }
+
+    int devNull = open("/dev/null", O_RDWR);
+
+    if(devNull < 0){
+        printf("Error while opening '/dev/null'\n");
+        exit_cleanup();
         exit(EXIT_FAILURE);
-    
-    // Terminate the parent process
-    if (pid > 0)
-        exit(EXIT_SUCCESS);
-    
-    // Set new file permissions
-    umask(0);
+    }
+
+    if(dup2(devNull, STDOUT_FILENO) < 0) {
+        printf("Error in dup2\n");
+        exit_cleanup();
+        exit(EXIT_FAILURE);
+    }
     
     // Change the working directory to the root directory
-    chdir("/");
+    if (chdir("/"))
+    {
+        printf("Error while changing to root dir\n");
+        exit_cleanup();
+        exit(EXIT_FAILURE);
+    }
 }
 
 void print_usage()
