@@ -1,15 +1,19 @@
 /**
  * @file    aesdsocket.c
- * @brief   This program creates a socket and listens on Port 9000. It connects to a 
- *          client, receives data until '\n' character is found and then writes the 
- *          received data to the file "/var/tmp/aesdsocketdata". It reads all the 
- *          data from the file and then sends it back to the client.
- *          
- *          Note: Runs in daemon mode when -d is passed.
+ * @brief   This program creates a socket and listens on Port 9000. It creates a
+ *          new for each new connection. The thereads receives data from client
+ *          until '\n' character is found and then writes the received data to 
+ *          the file "/var/tmp/aesdsocketdata". Then all the bytes from the file 
+ *          are read and sent it back to the client.
  * 
+ *          The timer handler will add time-stamp to "/var/tmp/aesdsocketdata"
+ *          file every 10 seconds.
+ *
+ *          Note: Runs in daemon mode when -d is passed.
+ *
  * @author  Ajay Kandagal <ajka9053@colorado.edu>
- * @date    Feb 25th 2023
-*/
+ * @date    Mar 5th 2023
+ */
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -22,55 +26,86 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <sys/queue.h>
+#include <pthread.h>
+#include <time.h>
+
 
 #define SERVER_PORT         (9000)
 #define MAX_BACKLOGS        (3)
 #define BUFFER_MAX_SIZE     (1024)
 #define SOCK_DATA_FILE      ("/var/tmp/aesdsocketdata")
 
-int process_read_data(char *buffer, int buff_len);
-int get_write_data(char **malloc_buffer, int total_size, int file_fd);
+
+// Macro from https://raw.githubusercontent.com/freebsd/freebsd/stable/10/sys/sys/queue.h
+#define SLIST_FOREACH_SAFE(var, head, field, tvar)        \
+    for ((var) = SLIST_FIRST((head));                     \
+         (var) && ((tvar) = SLIST_NEXT((var), field), 1); \
+         (var) = (tvar))
+
+
+void *connection_handler(void *client_data);
+int sock_read(int client_fd, char **malloc_buffer, int *malloc_buffer_len);
+int file_read(int file_fd, char **malloc_buffer, int *malloc_buffer_len);
 void become_daemon();
-void sig_int_term_handler();
 void print_usage();
 void exit_cleanup();
+void sig_int_term_handler();
+void sig_alarm_handler();
+
+
+struct client_node_t
+{
+    int sock_fd;
+    struct sockaddr_in addr;
+    socklen_t addr_len;
+    pthread_t thread_id;
+    char *malloc_buffer;
+    bool completed;
+    SLIST_ENTRY(client_node_t) client_list;
+};
+
+// Singly linked list to keep track of all the threads created
+SLIST_HEAD(client_list_head_t, client_node_t);
+struct client_list_head_t client_list_head;
 
 int file_fd;
-int server_fd;
-char *write_malloc_buffer = NULL;
+pthread_mutex_t file_lock;
 
-int main(int argc, char** argv)
+int server_fd;
+int sig_exit_status = 0;
+
+
+int main(int argc, char **argv)
 {
     int client_fd;
     struct sockaddr_in client_addr;
     socklen_t client_addr_len;
-    char client_addr_str[INET_ADDRSTRLEN];
     int opt = 1;
-
-    char buffer[BUFFER_MAX_SIZE];
-    int buffer_len = 0;
-
-    int total_recv_bytes = 0;
-
     int ret_status = 0;
     int run_as_daemon = 0;
 
     memset(&client_addr, 0, sizeof(client_addr));
     memset(&client_addr_len, 0, sizeof(client_addr_len));
 
-    if (argc <= 2) {
-        if (argc == 2) {
-            if (!strcmp(argv[1],"-d")) {
-               run_as_daemon = 1;
-               printf("The process will be run as daemon\n");
+    if (argc <= 2)
+    {
+        if (argc == 2)
+        {
+            if (!strcmp(argv[1], "-d"))
+            {
+                run_as_daemon = 1;
+                printf("aesdsocket will run as daemon\n");
             }
-            else {
+            else
+            {
                 print_usage();
                 return -1;
             }
         }
     }
-    else {
+    else
+    {
         print_usage();
         return -1;
     }
@@ -85,8 +120,17 @@ int main(int argc, char** argv)
 
     if (file_fd < 0)
     {
-        printf("Error: %s : Failed to open %s file\n", strerror(errno), SOCK_DATA_FILE);
-        syslog(LOG_ERR, "Error: %s : Failed to open %s file\n", strerror(errno), SOCK_DATA_FILE);
+        printf("Error while opening %s file: %s\n", SOCK_DATA_FILE, strerror(errno));
+        syslog(LOG_ERR, "Error while opening %s file: %s", SOCK_DATA_FILE, strerror(errno));
+        exit_cleanup();
+        return -1;
+    }
+
+    ret_status = pthread_mutex_init(&file_lock, NULL);
+
+    if (ret_status != 0)
+    {
+        perror("Mutex init has failed");
         exit_cleanup();
         return -1;
     }
@@ -97,8 +141,8 @@ int main(int argc, char** argv)
     // Check if socket is created successfully
     if (server_fd < 0)
     {
-        printf("Error: %s : Failed to create socket\n", strerror(errno));
-        syslog(LOG_ERR, "Error: %s : Failed to create socket\n", strerror(errno));
+        perror("Failed to create socket");
+        syslog(LOG_ERR, "Failed to create socket: %s", strerror(errno));
         exit_cleanup();
         return -1;
     }
@@ -106,8 +150,8 @@ int main(int argc, char** argv)
     // Set socket options for reusing address and port
     if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt)))
     {
-        printf("Error: %s : Failed to set socket options\n", strerror(errno));
-        syslog(LOG_ERR, "Error: %s : Failed to set socket options\n", strerror(errno));
+        perror("Failed to set socket options");
+        syslog(LOG_ERR, "Failed to set socket options: %s", strerror(errno));
         exit_cleanup();
         return -1;
     }
@@ -119,241 +163,336 @@ int main(int argc, char** argv)
 
     if (bind(server_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)))
     {
-        printf("Error: %s : Failed to bind on port %d\n", strerror(errno), SERVER_PORT);
-        syslog(LOG_ERR, "Error: %s : Failed to bind  on port %d\n", strerror(errno), SERVER_PORT);
+        printf("Failed to bind on port %d: %s\n", SERVER_PORT, strerror(errno));
+        syslog(LOG_ERR, "Failed to bind  on port %d: %s", SERVER_PORT, strerror(errno));
         exit_cleanup();
         return -1;
     }
 
     if (listen(server_fd, MAX_BACKLOGS))
     {
-        printf("Error: %s : Failed to start listening on port %d\n", strerror(errno), SERVER_PORT);
-        syslog(LOG_ERR, "Error: %s : Failed to start listening  on port %d\n", strerror(errno), SERVER_PORT);
+        printf("Failed to start listening on port %d: %s\n", SERVER_PORT, strerror(errno));
+        syslog(LOG_ERR, "Failed to start listening  on port %d: %s", SERVER_PORT, strerror(errno));
         exit_cleanup();
         return -1;
     }
-    
+
     printf("Listening on port %d...\n", SERVER_PORT);
-    syslog(LOG_INFO, "Listening on port %d...\n", SERVER_PORT);
+    syslog(LOG_INFO, "Listening on port %d...", SERVER_PORT);
 
     if (run_as_daemon)
         become_daemon();
 
-    while (true)       // loop for new connection
+    signal(SIGALRM, sig_alarm_handler);
+    // Set to generate SIGALRM signal every 10 seconds
+    alarm(10);
+
+    struct client_node_t *client_node;
+    struct client_node_t *tmp_client_node;
+    SLIST_INIT(&client_list_head);
+
+    while (true)
     {
         // Accept the incoming connection
         client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_addr_len);
 
-        // Get ip address of client in string
-        inet_ntop(AF_INET, &client_addr.sin_addr, client_addr_str, sizeof(client_addr_str));
-
         if (client_fd < 0)
         {
-            printf("Error: %s : Failed to connect to client\n", strerror(errno));
-            syslog(LOG_ERR, "Error: %s : Failed to connect to client\n", strerror(errno));
-            goto close_client;
+            if (sig_exit_status)
+                break;
+            
+            perror("Failed to connect to client");
+            syslog(LOG_ERR, "Failed to connect to client: %s", strerror(errno));
         }
         else
         {
-            printf("Accepted connection from %s\n", client_addr_str);
-            syslog(LOG_INFO, "Accepted connection from %s", client_addr_str);
-        }
+            // Store client data in client node struct
+            client_node = malloc(sizeof(struct client_node_t));
+            client_node->sock_fd = client_fd;
+            client_node->addr = client_addr;
+            client_node->addr_len = client_addr_len;
+            client_node->malloc_buffer = NULL;
+            client_node->completed = 0;
+            SLIST_INSERT_HEAD(&client_list_head, client_node, client_list);
 
-        while (true)   // loop for a connection session
-        {
-            while (true)   // loop for a read session until \n is found
+            // Create a new thread for the connection
+            ret_status = pthread_create(&client_node->thread_id, NULL, connection_handler, (void *)client_node);
+
+            if (ret_status < 0)
             {
-                buffer_len = read(client_fd, buffer, BUFFER_MAX_SIZE);
+                perror("Error while creating the thread");
+                syslog(LOG_ERR, "Error while creating the thread: %s\n", strerror(errno));
 
-                if (buffer_len == 0)
+                // Delete client node data from list if fails
+                SLIST_REMOVE(&client_list_head, client_node, client_node_t, client_list);
+
+                close(client_node->sock_fd);
+                free(client_node);
+            }
+            
+            // Join completed threads, remove the corresponding node from list and free the node
+            SLIST_FOREACH_SAFE(client_node, &client_list_head, client_list, tmp_client_node)
+            {
+                if (client_node->completed)
                 {
-                    goto close_client;
+                    pthread_join(client_node->thread_id, NULL);
+                    SLIST_REMOVE(&client_list_head, client_node, client_node_t, client_list);
+                    free(client_node);
                 }
-                else if(buffer_len < 0)
-                {
-                    printf("Error: %s : Error while getting data from the client\n", strerror(errno));
-                    syslog(LOG_ERR, "Error: %s : Error while getting data from the client\n", strerror(errno));
-                    goto close_client;
-                }
-
-                int ret_data = process_read_data(buffer, buffer_len);
-
-                if (ret_data == -1)
-                {
-                    printf("Error: Failed to malloc for read buffer\n");
-                    syslog(LOG_ERR, "Error: Failed to malloc for read buffer\n");
-                    goto close_client;
-                }
-                else if (ret_data > 0)
-                {
-                    total_recv_bytes += ret_data;
-                    break;
-                }
-                else;
             }
-            printf("Received all bytes from the client\n");
-            syslog(LOG_INFO, "Received all bytes from the client\n");
-
-            int ret_data = get_write_data(&write_malloc_buffer, total_recv_bytes, file_fd);
-
-            if (ret_data == -1)
-            {
-                printf("Error: Failed to malloc for write buffer\n");
-                syslog(LOG_ERR, "Error: Failed to malloc for write buffer\n");
-                goto close_client;
-            }
-            else if (ret_data != total_recv_bytes)
-            {
-                printf("Error: Failed to read all data from the file\n");
-                syslog(LOG_ERR, "Error: Failed to read all data from the file\n");
-                exit_cleanup();
-                return -1;
-            }
-            else
-            {
-                printf("Successfully read all bytes from the file\n");
-            }
-
-            buffer_len = write(client_fd, write_malloc_buffer, total_recv_bytes);
-
-            if (buffer_len == total_recv_bytes)
-            {
-                printf("Sent all bytes to the client\n");
-                syslog(LOG_INFO, "Sent all bytes to the client\n");
-            }
-            else if (buffer_len < 0)
-            {
-                printf("Error: %s : Detected error while writing on socket\n", strerror(errno));
-                syslog(LOG_ERR, "Error: %s : Detected error while writing on socket\n", strerror(errno));
-            }
-            else
-            {
-                printf("Error: Failed to send all bytes to client\n");
-                syslog(LOG_ERR, "Error: Failed to send all bytes to client\n");
-                goto close_client; 
-            }
-        }
-
-    close_client:
-        if (client_fd > 0)
-        {
-            close(client_fd);
-            printf("Connection Closed from %s\n", client_addr_str);
-            syslog(LOG_INFO, "Closed connection from %s", client_addr_str);
         }
     }
+
+    // Join all the threads
+    SLIST_FOREACH(client_node, &client_list_head, client_list)
+    {
+        pthread_join(client_node->thread_id, NULL);
+    }
+
+    // Delete all the threads' data
+    while (!SLIST_EMPTY(&client_list_head))
+    {
+        client_node = SLIST_FIRST(&client_list_head);
+        SLIST_REMOVE_HEAD(&client_list_head, client_list);
+        free(client_node);
+    }
+
+    pthread_mutex_destroy(&file_lock);
 
     exit_cleanup();
-    return ret_status;
-}
-
-/**
- * @brief   The function process the data read from the client. It mallocs buff_len
- *          size and copy data from the read buffer. If '\n' is found in the buffer
- *          then entire string will be copied to the file.
- * 
- * @param   
- *  *buffer     A char array contains data read from the client
- *  buff_len    Number of bytes present in the *buffer array.
- * 
- * @return  Returns number of bytes written to the file on success. Returns 0 if no
- *          bytes were written to the file. Returns -1 when malloc fails.
-*/
-int process_read_data(char *buffer, int buff_len)
-{
-    static char *malloc_buffer = NULL;
-    static int malloc_buffer_len = 0;
-    int index = 0;
-
-    // Find the delimeter '\n' in the received buffer
-    for (index = 0; index < buff_len && buffer[index] != '\n'; index++)
-        ;
-
-    if (malloc_buffer == NULL)
-        malloc_buffer = (char *)malloc(sizeof(char) * (index == buff_len ? buff_len : index + 1));
-    else
-        malloc_buffer = (char *)realloc(malloc_buffer, (malloc_buffer_len + (index == buff_len ? buff_len : index + 1)));
-
-    if (malloc_buffer == NULL)
-    {
-        return -1;
-    }
-
-    // copy data including \n and update malloc buffer length
-    memcpy(malloc_buffer + malloc_buffer_len, buffer, (index == buff_len ? buff_len : index + 1));
-    malloc_buffer_len += (index == buff_len ? buff_len : index + 1);
-
-    int ret_len = malloc_buffer_len;
-
-    if (index < buff_len)
-    {
-        if (write(file_fd, malloc_buffer, malloc_buffer_len) < 0)
-        {
-            printf("Error: %s : Detected error while writing to the file\n", strerror(errno));
-            syslog(LOG_ERR, "Error: %s : Detected error while writing to the file\n", strerror(errno));
-            ret_len = 0;
-        }
-        free(malloc_buffer);
-        malloc_buffer = NULL;
-        malloc_buffer_len = 0;
-
-        return ret_len;
-    }
-
+    
     return 0;
 }
 
 /**
- * @brief   The function process the data read from the client. It mallocs buff_len
- *          size and copy data from the read buffer. If '\n' is found in the buffer
- *          then entire string will be copied to the file.
- * 
- * @param   
- *  *buffer     A char array contains data read from the client
- *  buff_len    Number of bytes present in the *buffer array.
- * 
- * @return  Returns number of bytes written to the file on success. Returns -1 when 
- *          malloc fails.
-*/
-int get_write_data(char **malloc_buffer, int total_size, int file_fd)
+ * @brief   Receives data from client until '\n' character is found and then 
+ *          writes the received data to the file "/var/tmp/aesdsocketdata". 
+ *          Then all the bytes from the file are read and sent it back to the
+ *          client. After sending data to the client, closes the connection
+ *          and exits the thread execution.
+ *
+ * @param   client_data: Contains all the info related to the client such as
+ *          client fd, addr, thread completed status etc.
+ *
+ * @return  void
+ */
+void *connection_handler(void *client_data)
 {
-    if (*malloc_buffer != NULL)
-        free(*malloc_buffer);
+    struct client_node_t *client_node = (struct client_node_t *)client_data;
 
-    *malloc_buffer = (char *)malloc(sizeof(char) * total_size);
+    char client_addr_str[INET_ADDRSTRLEN];
 
-    if (*malloc_buffer == NULL)
+    // Get ip address of client in string
+    inet_ntop(AF_INET, &client_node->addr.sin_addr, client_addr_str, sizeof(client_addr_str));
+
+    printf("Accepted connection from %s\n", client_addr_str);
+    syslog(LOG_INFO, "Accepted connection from %s", client_addr_str);
+
+    int malloc_buffer_len = 0;
+    int ret_status;
+
+    while (true && !sig_exit_status) // loop for a read session until \n is found
     {
-        return -1;
+        ret_status = sock_read(client_node->sock_fd, &client_node->malloc_buffer, &malloc_buffer_len);
+
+        if (ret_status == 0)
+            continue;
+
+        if (ret_status < 0)
+            goto close_client;
+
+        pthread_mutex_lock(&file_lock);
+        ret_status = write(file_fd, client_node->malloc_buffer, malloc_buffer_len);
+        pthread_mutex_unlock(&file_lock);
+
+        if (ret_status < 0)
+        {
+            perror("Error while writing to the file");
+            syslog(LOG_ERR, "Error while writing to the file: %s", strerror(errno));
+            goto close_client;
+        }
+
+        break;
     }
 
-    lseek(file_fd, 0, SEEK_SET);
+    if (sig_exit_status)
+        goto close_client;
 
-    int read_ret = read(file_fd, *malloc_buffer, total_size);
+    ret_status = file_read(file_fd, &client_node->malloc_buffer, &malloc_buffer_len);
 
-    if (read_ret < 0)
+    if (ret_status < 0)
+        goto close_client;
+
+    ret_status = write(client_node->sock_fd, client_node->malloc_buffer, malloc_buffer_len);
+
+    if (ret_status < 0)
     {
-        printf("Error: %s : Detected error while reading from the file\n", strerror(errno));
-        syslog(LOG_ERR, "Error: %s : Detected error while reading from the file\n", strerror(errno));
-        read_ret = 0;
+        perror("Error while writing to the client");
+        syslog(LOG_ERR, "Error while writing to the client: %s", strerror(errno));
+    }
+    else 
+    {
+        printf("Sent all bytes to the client\n");
+        syslog(LOG_INFO, "Sent all bytes to the client");
     }
 
-    return read_ret;
+close_client:
+    if (client_node->malloc_buffer)
+    {
+        free(client_node->malloc_buffer);
+        client_node->malloc_buffer = NULL;
+    }
+
+    if (client_node->sock_fd > 0)
+    {
+        close(client_node->sock_fd);
+        client_node->sock_fd = 0;
+        printf("Connection Closed from %s\n", client_addr_str);
+        syslog(LOG_INFO, "Closed connection from %s", client_addr_str);
+    }
+
+    client_node->completed = 1;
+
+    return NULL;
 }
 
 /**
- * @brief   Closes all the open files and sockets. Deletes the file which was 
- *          opened for writing socket data.
- * 
- * @param   none
- * 
- * @return  void
-*/
-void exit_cleanup()
+ * @brief   Reads bytes from the client socket and copies that into the 
+ *          malloc buffer.
+ *
+ * @param   client_fd: Client file descriptor
+ * @param   malloc_buffer: Dynamically allocated, all bytes read from 
+ *          the socket are copied to this.
+ * @param   malloc_buffer_len: Updated to the size of malloc buffer.
+ *
+ * @return  Returns 1 when \n is encounterd in the read buffer and returns
+ *          0 when not found. Returns < 0 on error. 
+ */
+int sock_read(int client_fd, char **malloc_buffer, int *malloc_buffer_len)
 {
-    if (write_malloc_buffer)
-        free(write_malloc_buffer);
+    int bytes_count;
+    char buffer[BUFFER_MAX_SIZE];
+    int buffer_len = read(client_fd, buffer, BUFFER_MAX_SIZE);
 
+    if (buffer_len <= 0)
+    {
+        perror("Error while getting data from the client");
+        syslog(LOG_ERR, "Error while getting data from the client: %s\n", strerror(errno));
+        return -1;
+    }
+
+    int index = 0;
+
+    // Find the delimeter '\n' in the received buffer
+    for (index = 0; index < buffer_len && buffer[index] != '\n'; index++);
+
+    // Adjust buffer length to be allocated
+    if (index < buffer_len)
+        bytes_count = index + 1;
+    else
+        bytes_count = buffer_len;
+
+    if (*malloc_buffer)
+        *malloc_buffer = (char *)realloc(*malloc_buffer, *malloc_buffer_len + bytes_count);
+    else
+        *malloc_buffer = (char *)malloc(sizeof(char) * bytes_count);
+        
+    if (*malloc_buffer == NULL)
+    {
+        printf("Error while allocating memmory to buffer\n");
+        syslog(LOG_ERR, "Error while allocating memmory to buffer");
+        return -1;
+    }
+
+    // copy data including \n and update malloc buffer length
+    memcpy(*malloc_buffer + *malloc_buffer_len, buffer, bytes_count);
+    *malloc_buffer_len += bytes_count;
+
+    if (index < buffer_len)
+        return 1;
+    else
+        return 0;
+}
+
+/**
+ * @brief   Reads all the bytes from the file and copies it to the
+ *          malloc buffer.
+ *
+ * @param   file_fd: File descriptor
+ * @param   malloc_buffer: Dynamically allocated, all bytes read
+ *          from the file are copied to this.
+ * @param   malloc_buffer_len: Updated to the size of malloc buffer.
+ *
+ * @return  Returns 0 on success else < 0 value is returned on error. 
+ */
+int file_read(int file_fd, char **malloc_buffer, int *malloc_buffer_len)
+{
+    int char_count;
+    char char_data;
+    *malloc_buffer_len = 0;
+
+    pthread_mutex_lock(&file_lock);
+    lseek(file_fd, 0, SEEK_SET);
+    for (char_count = 0; read(file_fd, &char_data, 1) > 0; char_count++);
+    pthread_mutex_unlock(&file_lock);
+
+    if (char_count <= 0)
+    {
+        printf("File is empty!\n");
+        syslog(LOG_ERR, "File is empty!");
+        return -1;
+    }
+
+    if (*malloc_buffer)
+        *malloc_buffer = (char *)realloc(*malloc_buffer, char_count);
+    else
+        *malloc_buffer = (char *)malloc(sizeof(char) * char_count);
+        
+
+    if (*malloc_buffer == NULL)
+    {
+        printf("Error while allocating memmory to buffer\n");
+        syslog(LOG_ERR, "Error while allocating memmory to buffer");
+        return -1;
+    }
+
+    pthread_mutex_lock(&file_lock);
+
+    lseek(file_fd, 0, SEEK_SET);
+    int ret_status = read(file_fd, *malloc_buffer, char_count);
+
+    pthread_mutex_unlock(&file_lock);
+
+    if (ret_status < -0)
+    {
+        perror("Error while reading data from the file");
+        syslog(LOG_ERR, "Error while reading data from the file: %s", strerror(errno));
+
+        return -1;
+    }
+    else if (ret_status != char_count)
+    {
+        printf("Failed to read all data from the file\n");
+        syslog(LOG_ERR, "Failed to read all data from the file\n");
+        return -1;
+    }
+    else
+    {
+        *malloc_buffer_len = char_count;
+        return 0;
+    }
+}
+
+/**
+ * @brief   Closes all the open files, syslog and server socket. Deletes 
+ *          the file which was opened for writing socket data.
+ *
+ * @param   void
+ *
+ * @return  void
+ */
+void exit_cleanup(void)
+{
     if (file_fd > 0)
         close(file_fd);
 
@@ -367,90 +506,124 @@ void exit_cleanup()
 
 /**
  * @brief   Called when SIGINT or SIGTERM are received.
- * 
- * @param   none
- * 
+ *
+ * @param   void
+ *
  * @return  void
-*/
-void sig_int_term_handler()
+ */
+void sig_int_term_handler(void)
 {
     printf("Exiting...\n");
     syslog(LOG_INFO, "Exiting...\n");
-    exit_cleanup();
-    exit(EXIT_SUCCESS);
+    sig_exit_status = 1;
+    close(server_fd);
+}
+
+/**
+ * @brief   Signal handler function for SIGALRM, will be triggered
+ *          every 10 seconds. Logs the time-stamp data to the 
+ *          /var/tmp/aesdsocketdata file.
+ *
+ * @param   void
+ *
+ * @return  void
+ */
+void sig_alarm_handler(void)
+{
+    time_t raw_time;
+    struct tm *time_st;
+    char buffer[100];
+    char timestamp[80] = "timestamp:time\n";
+
+    time(&raw_time);
+
+    time_st = localtime(&raw_time);
+
+    strftime(timestamp,80,"%x - %H:%M:%S", time_st);
+
+    sprintf(buffer, "timestamp:%s\n", timestamp);
+
+    pthread_mutex_lock(&file_lock);
+    write(file_fd, buffer, strlen(buffer));
+    pthread_mutex_unlock(&file_lock);
+
+    alarm(10);
+}
+
+/**
+ * @brief   Prints out correct usage of application command when
+ *          user makes mistake.
+ *
+ * @param   void
+ *
+ * @return  void
+ */
+void print_usage(void)
+{
+    printf("Total number of arguements should 1 or less\n");
+    printf("The order of arguements should be:\n");
+    printf("\t1) To run the process as daemon\n");
+    printf("Usgae: aesdsocket -d\n");
 }
 
 /**
  * @brief   Makes the process to run as daemon when -d is passed
  *          while launching aesdsocket application.
- * 
- * @param   none
- * 
+ *
+ * @param   void
+ *
  * @return  void
-*/
-void become_daemon()
+ */
+void become_daemon(void)
 {
     pid_t pid;
-    
+
     pid = fork();
-    
+
     if (pid < 0)
     {
-        printf("Error while creating child process\n");
+        perror("Error while creating child process");
         exit_cleanup();
         exit(EXIT_FAILURE);
     }
-    
-     // Terminate the parent process
+
+    // Terminate the parent process
     if (pid > 0)
         exit(EXIT_SUCCESS);
-    
+
     // On success make the child process session leader
-    if (setsid() < 0) {
-        printf("Error: %s : Failed to make child process as session leader\n", strerror(errno));
-        syslog(LOG_ERR, "Error: %s : Failed to make child process as session leader\n", strerror(errno));
+    if (setsid() < 0)
+    {
+        perror("Failed to make child process as session leader");
+        syslog(LOG_ERR, "Failed to make child process as session leader: %s", strerror(errno));
         exit_cleanup();
         exit(EXIT_FAILURE);
     }
 
     int devNull = open("/dev/null", O_RDWR);
 
-    if(devNull < 0) {
-        printf("Error: %s : Failed to open '/dev/null'\n", strerror(errno));
-        syslog(LOG_ERR, "Error: %s : Failed to open '/dev/null'\n", strerror(errno));
+    if (devNull < 0)
+    {
+        perror("Failed to open '/dev/null'");
+        syslog(LOG_ERR, "Failed to open '/dev/null': %s", strerror(errno));
         exit_cleanup();
         exit(EXIT_FAILURE);
     }
 
-    if(dup2(devNull, STDOUT_FILENO) < 0) {
-        printf("Error: %s : Failed to redirect to '/dev/null'\n", strerror(errno));
-        syslog(LOG_ERR, "Error: %s : Failed to redirect to '/dev/null'\n", strerror(errno));
+    if (dup2(devNull, STDOUT_FILENO) < 0)
+    {
+        perror("Failed to redirect to '/dev/null'");
+        syslog(LOG_ERR, "Failed to redirect to '/dev/null': %s\n", strerror(errno));
         exit_cleanup();
         exit(EXIT_FAILURE);
     }
-    
+
     // Change the working directory to the root directory
     if (chdir("/"))
     {
-        printf("Error: %s : Failed to switch to root directory\n", strerror(errno));
-        syslog(LOG_ERR, "Error: %s : Failed to switch to root directory\n", strerror(errno));
+        perror("Failed to switch to root directory");
+        syslog(LOG_ERR, "Failed to switch to root directory: %s", strerror(errno));
         exit_cleanup();
         exit(EXIT_FAILURE);
     }
-}
-
-/**
- * @brief   Prints out correct usage of application command when
- *          user makes mistake.
- * 
- * @param   none
- * 
- * @return  void
-*/
-void print_usage()
-{
-    printf("Total number of arguements should 1 or less\n");
-    printf("The order of arguements should be:\n");
-    printf("\t1) To run the process as daemon\n");
-    printf("Usgae: aesdsocket -d\n");
 }
