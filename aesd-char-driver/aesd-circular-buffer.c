@@ -12,6 +12,8 @@
 #include <linux/string.h>
 #else
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 #endif
 
 #include "aesd-circular-buffer.h"
@@ -29,9 +31,33 @@
 struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct aesd_circular_buffer *buffer,
             size_t char_offset, size_t *entry_offset_byte_rtn )
 {
-    /**
-    * TODO: implement per description
-    */
+    // Check if buffer is empty
+    if ((buffer->in_offs == buffer->out_offs) && !buffer->full)
+        return NULL;
+
+    uint8_t index = buffer->out_offs;
+
+    do {
+        // If char_offset gets lower than size, then offset should be 
+        // within the current buffptr
+        if (char_offset < buffer->entry[index].size)
+        {
+            *entry_offset_byte_rtn = char_offset; 
+            return &(buffer->entry[index]);
+        }
+        else
+        {
+            char_offset -= buffer->entry[index].size;
+        }
+
+        index++;
+
+        // Wrapping index pointer when reaches the end of buffer
+        if (index == AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED)
+            index = 0;
+            
+    }while (index != buffer->in_offs);
+
     return NULL;
 }
 
@@ -44,9 +70,23 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct
 */
 void aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const struct aesd_buffer_entry *add_entry)
 {
-    /**
-    * TODO: implement per description
-    */
+    buffer->entry[buffer->in_offs].buffptr = add_entry->buffptr;
+    buffer->entry[buffer->in_offs].size = add_entry->size;
+
+    buffer->in_offs++;
+    
+    // Wrapping input offset pointer when reaches the end of buffer
+    if (buffer->in_offs == AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED)
+        buffer->in_offs = 0;
+
+    // If buffer is full, then old data will be overwritten hence output pointer
+    // has to be changed to new location
+    if (buffer->full)
+        buffer->out_offs = buffer->in_offs;
+
+    // If input and output offset are same then buffer is full
+    if (buffer->in_offs == buffer->out_offs)
+        buffer->full = true;
 }
 
 /**
