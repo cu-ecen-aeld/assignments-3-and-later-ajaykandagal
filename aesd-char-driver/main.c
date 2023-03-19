@@ -23,7 +23,7 @@
 int aesd_major =   0; // use dynamic major
 int aesd_minor =   0;
 
-MODULE_AUTHOR("Your Name Here"); /** TODO: fill in your name **/
+MODULE_AUTHOR("Ajay Kandagal"); /** TODO: fill in your name **/
 MODULE_LICENSE("Dual BSD/GPL");
 
 struct aesd_dev aesd_device;
@@ -132,7 +132,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
 	// *f_pos += count;
     dev->entryptr.size += count;
 
-    if (strchr(dev->entryptr.buffptr, '\n')) {
+    if (memchr(dev->entryptr.buffptr, '\n', dev->entryptr.size)) {
         if (dev->cb_buffer.entry[dev->cb_buffer.in_offs].buffptr)
             kfree(dev->cb_buffer.entry[dev->cb_buffer.in_offs].buffptr);
 
