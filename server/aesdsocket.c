@@ -30,12 +30,17 @@
 #include <pthread.h>
 #include <time.h>
 
-#define TIME_STAMPING       0
+#define USE_AESD_CHAR_DEVICE    1
 
 #define SERVER_PORT         (9000)
 #define MAX_BACKLOGS        (3)
 #define BUFFER_MAX_SIZE     (1024)
-#define SOCK_DATA_FILE      ("/dev/aesdchar") //("/var/tmp/aesdsocketdata")
+
+#if USE_AESD_CHAR_DEVICE
+#define SOCK_DATA_FILE      ("/dev/aesdchar")
+#else
+#define SOCK_DATA_FILE      ("/var/tmp/aesdsocketdata")
+#endif
 
 // Macro from https://raw.githubusercontent.com/freebsd/freebsd/stable/10/sys/sys/queue.h
 #define SLIST_FOREACH_SAFE(var, head, field, tvar)        \
@@ -51,7 +56,8 @@ void become_daemon();
 void print_usage();
 void exit_cleanup();
 void sig_int_term_handler();
-#if TIME_STAMPING
+
+#if !USE_AESD_CHAR_DEVICE
 void sig_alarm_handler();
 #endif
 
@@ -184,7 +190,7 @@ int main(int argc, char **argv)
     if (run_as_daemon)
         become_daemon();
 
-#if TIME_STAMPING
+#if !USE_AESD_CHAR_DEVICE
     signal(SIGALRM, sig_alarm_handler);
     // Set to generate SIGALRM signal every 10 seconds
     alarm(10);
@@ -531,7 +537,7 @@ void sig_int_term_handler(void)
  *
  * @return  void
  */
-#if TIME_STAMPING
+#if !USE_AESD_CHAR_DEVICE
 void sig_alarm_handler(void)
 {
     time_t raw_time;

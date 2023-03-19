@@ -133,6 +133,9 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     dev->entryptr.size += count;
 
     if (strchr(dev->entryptr.buffptr, '\n')) {
+        if (dev->cb_buffer.entry[dev->cb_buffer.in_offs].buffptr)
+            kfree(dev->cb_buffer.entry[dev->cb_buffer.in_offs].buffptr);
+
         aesd_circular_buffer_add_entry(&dev->cb_buffer, &dev->entryptr);
         dev->entryptr.buffptr = NULL;
         dev->entryptr.size = 0;
@@ -216,6 +219,7 @@ int aesd_init_module(void)
     /**
      * TODO: initialize the AESD specific portion of the device
      */
+    aesd_circular_buffer_init(&aesd_device.cb_buffer);
     mutex_init(&aesd_device.lock);
 
     result = aesd_setup_cdev(&aesd_device);
