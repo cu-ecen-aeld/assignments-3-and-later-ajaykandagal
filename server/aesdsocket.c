@@ -30,12 +30,12 @@
 #include <pthread.h>
 #include <time.h>
 
+#define TIME_STAMPING       0
 
 #define SERVER_PORT         (9000)
 #define MAX_BACKLOGS        (3)
 #define BUFFER_MAX_SIZE     (1024)
-#define SOCK_DATA_FILE      ("/var/tmp/aesdsocketdata")
-
+#define SOCK_DATA_FILE      ("/dev/aesdchar") //("/var/tmp/aesdsocketdata")
 
 // Macro from https://raw.githubusercontent.com/freebsd/freebsd/stable/10/sys/sys/queue.h
 #define SLIST_FOREACH_SAFE(var, head, field, tvar)        \
@@ -51,7 +51,9 @@ void become_daemon();
 void print_usage();
 void exit_cleanup();
 void sig_int_term_handler();
+#if TIME_STAMPING
 void sig_alarm_handler();
+#endif
 
 
 struct client_node_t
@@ -115,7 +117,6 @@ int main(int argc, char **argv)
     signal(SIGINT, sig_int_term_handler);
     signal(SIGTERM, sig_int_term_handler);
 
-    // file_ptr = fopen("/var/tmp/aesdsocketdata", "w+");
     file_fd = open(SOCK_DATA_FILE, O_CREAT | O_RDWR, S_IRWXU | S_IRWXG | S_IRWXO);
 
     if (file_fd < 0)
@@ -183,9 +184,11 @@ int main(int argc, char **argv)
     if (run_as_daemon)
         become_daemon();
 
+#if TIME_STAMPING
     signal(SIGALRM, sig_alarm_handler);
     // Set to generate SIGALRM signal every 10 seconds
     alarm(10);
+#endif
 
     struct client_node_t *client_node;
     struct client_node_t *tmp_client_node;
@@ -463,7 +466,7 @@ int file_read(int file_fd, char **malloc_buffer, int *malloc_buffer_len)
 
     pthread_mutex_unlock(&file_lock);
 
-    if (ret_status < -0)
+    if (ret_status < 0)
     {
         perror("Error while reading data from the file");
         syslog(LOG_ERR, "Error while reading data from the file: %s", strerror(errno));
@@ -472,7 +475,7 @@ int file_read(int file_fd, char **malloc_buffer, int *malloc_buffer_len)
     }
     else if (ret_status != char_count)
     {
-        printf("Failed to read all data from the file\n");
+        printf("Failed to read all data from the file: %d : %d\n", ret_status, char_count);
         syslog(LOG_ERR, "Failed to read all data from the file\n");
         return -1;
     }
@@ -528,6 +531,7 @@ void sig_int_term_handler(void)
  *
  * @return  void
  */
+#if TIME_STAMPING
 void sig_alarm_handler(void)
 {
     time_t raw_time;
@@ -549,6 +553,7 @@ void sig_alarm_handler(void)
 
     alarm(10);
 }
+#endif
 
 /**
  * @brief   Prints out correct usage of application command when
