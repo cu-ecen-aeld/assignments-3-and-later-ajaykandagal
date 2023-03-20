@@ -312,9 +312,13 @@ void *connection_handler(void *client_data)
             goto close_client;
 
         file_fd = open(SOCK_DATA_FILE, O_RDWR);
+#if !USE_AESD_CHAR_DEVICE
         pthread_mutex_lock(&file_lock);
+#endif
         ret_status = write(file_fd, client_node->malloc_buffer, malloc_buffer_len);
+#if !USE_AESD_CHAR_DEVICE
         pthread_mutex_unlock(&file_lock);
+#endif
         close(file_fd);
 
         if (ret_status < 0)
@@ -444,10 +448,14 @@ int file_read(int file_fd, char **malloc_buffer, int *malloc_buffer_len)
     *malloc_buffer_len = 0;
 
     file_fd = open(SOCK_DATA_FILE, O_RDWR);
+#if !USE_AESD_CHAR_DEVICE
     pthread_mutex_lock(&file_lock);
+#endif
     lseek(file_fd, 0, SEEK_SET);
     for (char_count = 0; read(file_fd, &char_data, 1) > 0; char_count++);
+#if !USE_AESD_CHAR_DEVICE
     pthread_mutex_unlock(&file_lock);
+#endif
 
     if (char_count <= 0)
     {
@@ -469,10 +477,14 @@ int file_read(int file_fd, char **malloc_buffer, int *malloc_buffer_len)
         return -1;
     }
 
+#if !USE_AESD_CHAR_DEVICE
     pthread_mutex_lock(&file_lock);
+#endif
     lseek(file_fd, 0, SEEK_SET);
     int ret_status = read(file_fd, *malloc_buffer, char_count);
+#if !USE_AESD_CHAR_DEVICE
     pthread_mutex_unlock(&file_lock);
+#endif
     close(file_fd);
 
     if (ret_status < 0)

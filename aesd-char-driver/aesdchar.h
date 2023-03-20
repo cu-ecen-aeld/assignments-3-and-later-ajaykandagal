@@ -32,6 +32,7 @@ struct aesd_dev
      */
     struct aesd_circular_buffer cb_buffer;
     struct aesd_buffer_entry entryptr;
+    size_t total_bytes;
     struct mutex lock;
     struct cdev cdev;     /* Char device structure      */
 };

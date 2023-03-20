@@ -56,11 +56,12 @@ int aesd_release(struct inode *inode, struct file *filp)
 ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
                 loff_t *f_pos)
 {
-    struct aesd_dev *dev = filp->private_data;
-    struct aesd_buffer_entry *entryptr;
     ssize_t retval = 0;
     ssize_t offset = 0;
-    size_t rem_count = count, act_count;
+    size_t act_count;
+    size_t rem_count = count;
+    struct aesd_buffer_entry *entryptr;
+    struct aesd_dev *dev = filp->private_data;
     
     PDEBUG("read %zu bytes with offset %lld",count,*f_pos);
 
@@ -70,15 +71,17 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
     if (mutex_lock_interruptible(&dev->lock))
 		return -ERESTARTSYS;
 
+    // Loop to read count number of bytes from all the entires of circular buffer
     do {
         entryptr = aesd_circular_buffer_find_entry_offset_for_fpos(&dev->cb_buffer, *f_pos, &offset);
 
         if (entryptr == NULL)
             goto out;
 
-        // Only read till available read bytes
+        // Number of bytes to read from current entry buffer
         act_count = (entryptr->size - offset);
 
+        // Cannot read more than requested byte count
         if (act_count > rem_count)
             act_count = rem_count;
 
@@ -124,34 +127,36 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
         goto out;
     }
 
-    // copy data including \n and update malloc buffer length
     if (copy_from_user((void*)dev->entryptr.buffptr + dev->entryptr.size, buf, count)) {
 		retval = -EFAULT;
 		goto out;
 	}
-	// *f_pos += count;
-    dev->entryptr.size += count;
 
+    dev->entryptr.size += count;
+    retval = count;
+
+    // If '\n' is present then add the entry to the circular buffer
     if (memchr(dev->entryptr.buffptr, '\n', dev->entryptr.size)) {
-        if (dev->cb_buffer.entry[dev->cb_buffer.in_offs].buffptr)
+        if (dev->cb_buffer.entry[dev->cb_buffer.in_offs].buffptr) {
             kfree(dev->cb_buffer.entry[dev->cb_buffer.in_offs].buffptr);
+            dev->total_bytes -= dev->cb_buffer.entry[dev->cb_buffer.in_offs].size;
+        }
 
         aesd_circular_buffer_add_entry(&dev->cb_buffer, &dev->entryptr);
+        dev->total_bytes += dev->entryptr.size;
         dev->entryptr.buffptr = NULL;
         dev->entryptr.size = 0;
     }
-
-	retval = count;
 
     out:
 	mutex_unlock(&dev->lock);
 	return retval;
 }
 
-loff_t scull_llseek(struct file *filp, loff_t off, int whence)
+loff_t aesd_llseek(struct file *filp, loff_t off, int whence)
 {
-	// struct aesd_dev *dev = filp->private_data;
 	loff_t newpos;
+    struct aesd_dev *dev = filp->private_data;
 
 	switch(whence) {
 	  case 0: /* SEEK_SET */
@@ -162,9 +167,10 @@ loff_t scull_llseek(struct file *filp, loff_t off, int whence)
 		newpos = filp->f_pos + off;
 		break;
 
-	//   case 2: /* SEEK_END */
-	// 	newpos = dev->size + off;
-	// 	break;
+	  case 2: /* SEEK_END */
+        if (dev->total_bytes >= off)
+		    newpos = dev->total_bytes - off;
+		break;
 
 	  default: /* can't happen */
 		return -EINVAL;
@@ -183,7 +189,7 @@ struct file_operations aesd_fops = {
     .write =    aesd_write,
     .open =     aesd_open,
     .release =  aesd_release,
-    .llseek =  scull_llseek,
+    .llseek =  aesd_llseek,
 };
 
 static int aesd_setup_cdev(struct aesd_dev *dev)
@@ -207,8 +213,7 @@ int aesd_init_module(void)
 {
     dev_t dev = 0;
     int result;
-    result = alloc_chrdev_region(&dev, aesd_minor, 1,
-            "aesdchar");
+    result = alloc_chrdev_region(&dev, aesd_minor, 1, "aesdchar");
     aesd_major = MAJOR(dev);
     if (result < 0) {
         printk(KERN_WARNING "Can't get major %d\n", aesd_major);
@@ -247,10 +252,10 @@ void aesd_cleanup_module(void)
         if (entryptr->buffptr)
             kfree(entryptr->buffptr);
     }
+    mutex_destroy(&aesd_device.lock);
 
     unregister_chrdev_region(devno, 1);
 }
-
 
 
 module_init(aesd_init_module);
