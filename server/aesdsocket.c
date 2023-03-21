@@ -30,12 +30,17 @@
 #include <pthread.h>
 #include <time.h>
 
+#define USE_AESD_CHAR_DEVICE    1
 
 #define SERVER_PORT         (9000)
 #define MAX_BACKLOGS        (3)
 #define BUFFER_MAX_SIZE     (1024)
-#define SOCK_DATA_FILE      ("/var/tmp/aesdsocketdata")
 
+#if USE_AESD_CHAR_DEVICE
+#define SOCK_DATA_FILE      ("/dev/aesdchar")
+#else
+#define SOCK_DATA_FILE      ("/var/tmp/aesdsocketdata")
+#endif
 
 // Macro from https://raw.githubusercontent.com/freebsd/freebsd/stable/10/sys/sys/queue.h
 #define SLIST_FOREACH_SAFE(var, head, field, tvar)        \
@@ -51,7 +56,10 @@ void become_daemon();
 void print_usage();
 void exit_cleanup();
 void sig_int_term_handler();
+
+#if !USE_AESD_CHAR_DEVICE
 void sig_alarm_handler();
+#endif
 
 
 struct client_node_t
@@ -115,7 +123,6 @@ int main(int argc, char **argv)
     signal(SIGINT, sig_int_term_handler);
     signal(SIGTERM, sig_int_term_handler);
 
-    // file_ptr = fopen("/var/tmp/aesdsocketdata", "w+");
     file_fd = open(SOCK_DATA_FILE, O_CREAT | O_RDWR, S_IRWXU | S_IRWXG | S_IRWXO);
 
     if (file_fd < 0)
@@ -125,6 +132,7 @@ int main(int argc, char **argv)
         exit_cleanup();
         return -1;
     }
+    close(file_fd);
 
     ret_status = pthread_mutex_init(&file_lock, NULL);
 
@@ -183,9 +191,11 @@ int main(int argc, char **argv)
     if (run_as_daemon)
         become_daemon();
 
+#if !USE_AESD_CHAR_DEVICE
     signal(SIGALRM, sig_alarm_handler);
     // Set to generate SIGALRM signal every 10 seconds
     alarm(10);
+#endif
 
     struct client_node_t *client_node;
     struct client_node_t *tmp_client_node;
@@ -301,9 +311,15 @@ void *connection_handler(void *client_data)
         if (ret_status < 0)
             goto close_client;
 
+        file_fd = open(SOCK_DATA_FILE, O_RDWR);
+#if !USE_AESD_CHAR_DEVICE
         pthread_mutex_lock(&file_lock);
+#endif
         ret_status = write(file_fd, client_node->malloc_buffer, malloc_buffer_len);
+#if !USE_AESD_CHAR_DEVICE
         pthread_mutex_unlock(&file_lock);
+#endif
+        close(file_fd);
 
         if (ret_status < 0)
         {
@@ -431,10 +447,15 @@ int file_read(int file_fd, char **malloc_buffer, int *malloc_buffer_len)
     char char_data;
     *malloc_buffer_len = 0;
 
+    file_fd = open(SOCK_DATA_FILE, O_RDWR);
+#if !USE_AESD_CHAR_DEVICE
     pthread_mutex_lock(&file_lock);
+#endif
     lseek(file_fd, 0, SEEK_SET);
     for (char_count = 0; read(file_fd, &char_data, 1) > 0; char_count++);
+#if !USE_AESD_CHAR_DEVICE
     pthread_mutex_unlock(&file_lock);
+#endif
 
     if (char_count <= 0)
     {
@@ -456,14 +477,17 @@ int file_read(int file_fd, char **malloc_buffer, int *malloc_buffer_len)
         return -1;
     }
 
+#if !USE_AESD_CHAR_DEVICE
     pthread_mutex_lock(&file_lock);
-
+#endif
     lseek(file_fd, 0, SEEK_SET);
     int ret_status = read(file_fd, *malloc_buffer, char_count);
-
+#if !USE_AESD_CHAR_DEVICE
     pthread_mutex_unlock(&file_lock);
+#endif
+    close(file_fd);
 
-    if (ret_status < -0)
+    if (ret_status < 0)
     {
         perror("Error while reading data from the file");
         syslog(LOG_ERR, "Error while reading data from the file: %s", strerror(errno));
@@ -472,7 +496,7 @@ int file_read(int file_fd, char **malloc_buffer, int *malloc_buffer_len)
     }
     else if (ret_status != char_count)
     {
-        printf("Failed to read all data from the file\n");
+        printf("Failed to read all data from the file: %d : %d\n", ret_status, char_count);
         syslog(LOG_ERR, "Failed to read all data from the file\n");
         return -1;
     }
@@ -528,6 +552,7 @@ void sig_int_term_handler(void)
  *
  * @return  void
  */
+#if !USE_AESD_CHAR_DEVICE
 void sig_alarm_handler(void)
 {
     time_t raw_time;
@@ -549,6 +574,7 @@ void sig_alarm_handler(void)
 
     alarm(10);
 }
+#endif
 
 /**
  * @brief   Prints out correct usage of application command when
