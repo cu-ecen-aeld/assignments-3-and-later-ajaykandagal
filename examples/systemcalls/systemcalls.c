@@ -1,4 +1,10 @@
 #include "systemcalls.h"
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
 
 /**
  * @param cmd the command to execute with system()
@@ -16,6 +22,12 @@ bool do_system(const char *cmd)
  *   and return a boolean true if the system() call completed with success
  *   or false() if it returned a failure
 */
+    int ret = system(cmd);
+
+    if (ret != 0) {
+        printf("Error: Could not execute the \"%s\" command", cmd);
+        return false;
+    }
 
     return true;
 }
@@ -40,6 +52,7 @@ bool do_exec(int count, ...)
     va_start(args, count);
     char * command[count+1];
     int i;
+
     for(i=0; i<count; i++)
     {
         command[i] = va_arg(args, char *);
@@ -58,10 +71,36 @@ bool do_exec(int count, ...)
  *   as second argument to the execv() command.
  *
 */
+    pid_t pid;
+    bool ret_status = true;
+
+    pid = fork();
+
+    if (pid == -1)
+    {
+        printf("Error: Could not create child process\n");
+        ret_status = false;
+    }
+    else if (pid == 0)
+    {
+        int status = execv(command[0], command);
+
+        if (status != 0) {
+            printf("Error: Could not execute the \"%s\" command\n", command[0]);
+            exit(EXIT_FAILURE);
+        }
+    }
+    else {
+        int cmd_status;
+
+        if(waitpid(pid, &cmd_status, 0) == -1 )
+            ret_status = false;
+        if (WEXITSTATUS(cmd_status))
+            ret_status = false;
+    }
 
     va_end(args);
-
-    return true;
+    return ret_status;
 }
 
 /**
@@ -92,8 +131,50 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
  *   The rest of the behaviour is same as do_exec()
  *
 */
+    bool ret_status = true;
 
+    int fd = open(outputfile, O_WRONLY|O_TRUNC|O_CREAT, 0644);
+
+    if (fd < 0)
+    {
+        printf("Failed to open the file %s\n", outputfile);
+        return false;
+    }
+
+    pid_t pid = fork();
+
+    if (pid == -1)
+    {
+        printf("Error: Could not create child process\n");
+        ret_status = false;
+    }
+    else if (pid == 0)
+    {
+        if (dup2(fd, 1) < 0)
+        {
+            perror("dup2");
+            ret_status = false;
+        }
+        close(fd);
+
+        int status = execv(command[0], command);
+
+        if (status != 0) {
+            printf("Error: Could not execute the \"%s\" command\n", command[0]);
+            exit(EXIT_FAILURE);
+        }
+    }
+    else {
+        int cmd_status;
+
+        if(waitpid(pid, &cmd_status, 0) == -1 )
+            ret_status = false;
+        if (WEXITSTATUS(cmd_status))
+            ret_status = false;
+    }
+
+    close(fd);
     va_end(args);
 
-    return true;
+    return ret_status;
 }
