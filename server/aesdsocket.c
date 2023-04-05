@@ -1,4 +1,4 @@
-/**
+/*******************************************************************************
  * @file    aesdsocket.c
  * @brief   This program creates a socket and listens on Port 9000. It creates a
  *          new for each new connection. The thereads receives data from client
@@ -13,7 +13,15 @@
  *
  * @author  Ajay Kandagal <ajka9053@colorado.edu>
  * @date    Mar 5th 2023
- */
+ * 
+ * @change  Socket data is writte to /dev/aesd instead of /var/tmp/aesdsocketdata.
+ * @date    Mar 19th 2023
+ * 
+ * @change  String "AESDCHAR_IOCSEEKTO:X,Y" is processed when received on socket
+ *          and subsequently ioctl operation is called.
+ * @date    Apr 2nd 2023
+ *******************************************************************************/
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -29,6 +37,9 @@
 #include <sys/queue.h>
 #include <pthread.h>
 #include <time.h>
+#include <sys/ioctl.h>
+
+#include "../aesd-char-driver/aesd_ioctl.h"
 
 #define USE_AESD_CHAR_DEVICE    1
 
@@ -300,6 +311,15 @@ void *connection_handler(void *client_data)
 
     int malloc_buffer_len = 0;
     int ret_status;
+    char *write_cmd;
+    char *write_offset;
+    struct aesd_seekto seekto;
+
+#if !USE_AESD_CHAR_DEVICE
+        pthread_mutex_lock(&file_lock);
+#endif
+
+    file_fd = open(SOCK_DATA_FILE, O_RDWR);
 
     while (true && !sig_exit_status) // loop for a read session until \n is found
     {
@@ -311,15 +331,51 @@ void *connection_handler(void *client_data)
         if (ret_status < 0)
             goto close_client;
 
-        file_fd = open(SOCK_DATA_FILE, O_RDWR);
-#if !USE_AESD_CHAR_DEVICE
-        pthread_mutex_lock(&file_lock);
-#endif
-        ret_status = write(file_fd, client_node->malloc_buffer, malloc_buffer_len);
-#if !USE_AESD_CHAR_DEVICE
-        pthread_mutex_unlock(&file_lock);
-#endif
-        close(file_fd);
+        // Check if received string contains command
+        if (!memcmp(client_node->malloc_buffer, "AESDCHAR_IOCSEEKTO:", 19))
+        {
+            // Get position of X which should be just after ':'
+            write_cmd = memchr(client_node->malloc_buffer, ':', malloc_buffer_len);
+            
+            if ((client_node->malloc_buffer - write_cmd) >= (malloc_buffer_len - 1))
+                goto close_client;
+
+            // Get position of Y which should be just after ','
+            write_offset = memchr(client_node->malloc_buffer, ',', malloc_buffer_len);
+
+            if ((client_node->malloc_buffer - write_offset) >= (malloc_buffer_len - 1))
+                goto close_client;
+
+            write_cmd++;
+
+            if(write_cmd == write_offset)
+                goto close_client;
+
+            /* Convert character array starting from 'write_cmd' address to 'write_offset' 
+            to string which ends with null character */
+            *write_offset = '\0';
+
+            seekto.write_cmd = atoi(write_cmd);
+
+            write_offset++;
+
+            if(write_offset == client_node->malloc_buffer + (malloc_buffer_len - 1))
+                goto close_client;
+
+            /* Convert character array starting from 'write_offset' address to end of buffer
+            to string which ends with null character */
+            client_node->malloc_buffer[malloc_buffer_len - 1] = '\0';
+
+            seekto.write_cmd_offset = atoi(write_offset);
+
+            if (ioctl(file_fd, AESDCHAR_IOCSEEKTO, &seekto))
+                perror("IOCTL Error");
+
+        }
+        else
+        {
+            ret_status = write(file_fd, client_node->malloc_buffer, malloc_buffer_len);
+        }
 
         if (ret_status < 0)
         {
@@ -334,25 +390,25 @@ void *connection_handler(void *client_data)
     if (sig_exit_status)
         goto close_client;
 
-    ret_status = file_read(file_fd, &client_node->malloc_buffer, &malloc_buffer_len);
+    char buffer[BUFFER_MAX_SIZE];
 
-    if (ret_status < 0)
-        goto close_client;
-
-    ret_status = write(client_node->sock_fd, client_node->malloc_buffer, malloc_buffer_len);
-
-    if (ret_status < 0)
+    while(1)
     {
-        perror("Error while writing to the client");
-        syslog(LOG_ERR, "Error while writing to the client: %s", strerror(errno));
-    }
-    else 
-    {
-        printf("Sent all bytes to the client\n");
-        syslog(LOG_INFO, "Sent all bytes to the client");
+        ret_status = read(file_fd, buffer, BUFFER_MAX_SIZE);
+
+        if (ret_status <= 0)
+            break;
+
+        write(client_node->sock_fd, buffer, ret_status);
     }
 
 close_client:
+    close(file_fd);
+
+#if !USE_AESD_CHAR_DEVICE
+    pthread_mutex_unlock(&file_lock);
+#endif
+
     if (client_node->malloc_buffer)
     {
         free(client_node->malloc_buffer);
@@ -428,83 +484,6 @@ int sock_read(int client_fd, char **malloc_buffer, int *malloc_buffer_len)
         return 1;
     else
         return 0;
-}
-
-/**
- * @brief   Reads all the bytes from the file and copies it to the
- *          malloc buffer.
- *
- * @param   file_fd: File descriptor
- * @param   malloc_buffer: Dynamically allocated, all bytes read
- *          from the file are copied to this.
- * @param   malloc_buffer_len: Updated to the size of malloc buffer.
- *
- * @return  Returns 0 on success else < 0 value is returned on error. 
- */
-int file_read(int file_fd, char **malloc_buffer, int *malloc_buffer_len)
-{
-    int char_count;
-    char char_data;
-    *malloc_buffer_len = 0;
-
-    file_fd = open(SOCK_DATA_FILE, O_RDWR);
-#if !USE_AESD_CHAR_DEVICE
-    pthread_mutex_lock(&file_lock);
-#endif
-    lseek(file_fd, 0, SEEK_SET);
-    for (char_count = 0; read(file_fd, &char_data, 1) > 0; char_count++);
-#if !USE_AESD_CHAR_DEVICE
-    pthread_mutex_unlock(&file_lock);
-#endif
-
-    if (char_count <= 0)
-    {
-        printf("File is empty!\n");
-        syslog(LOG_ERR, "File is empty!");
-        return -1;
-    }
-
-    if (*malloc_buffer)
-        *malloc_buffer = (char *)realloc(*malloc_buffer, char_count);
-    else
-        *malloc_buffer = (char *)malloc(sizeof(char) * char_count);
-        
-
-    if (*malloc_buffer == NULL)
-    {
-        printf("Error while allocating memmory to buffer\n");
-        syslog(LOG_ERR, "Error while allocating memmory to buffer");
-        return -1;
-    }
-
-#if !USE_AESD_CHAR_DEVICE
-    pthread_mutex_lock(&file_lock);
-#endif
-    lseek(file_fd, 0, SEEK_SET);
-    int ret_status = read(file_fd, *malloc_buffer, char_count);
-#if !USE_AESD_CHAR_DEVICE
-    pthread_mutex_unlock(&file_lock);
-#endif
-    close(file_fd);
-
-    if (ret_status < 0)
-    {
-        perror("Error while reading data from the file");
-        syslog(LOG_ERR, "Error while reading data from the file: %s", strerror(errno));
-
-        return -1;
-    }
-    else if (ret_status != char_count)
-    {
-        printf("Failed to read all data from the file: %d : %d\n", ret_status, char_count);
-        syslog(LOG_ERR, "Failed to read all data from the file\n");
-        return -1;
-    }
-    else
-    {
-        *malloc_buffer_len = char_count;
-        return 0;
-    }
 }
 
 /**
